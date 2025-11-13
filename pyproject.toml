@@ -1,0 +1,19 @@
+[project]
+name = "marker_gen"
+version = "0.1.0"
+description = "Default template for PDM package"
+authors = [
+    {name = "radoskov",email = "radoslav.skoviera@cvut.cz"},
+]
+dependencies = ["opencv-python>=4.12.0.88", "pillow>=12.0.0"]
+requires-python = ">=3.13"
+readme = "README.md"
+license = {text = "GNU GPLv3"}
+
+[build-system]
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
+
+
+[tool.pdm]
+distribution = true
