@@ -5,7 +5,7 @@ description = "Default template for PDM package"
 authors = [
     {name = "radoskov",email = "radoslav.skoviera@cvut.cz"},
 ]
-dependencies = ["opencv-python>=4.12.0.88", "pillow>=12.0.0"]
+dependencies = ["pillow>=12.0.0", "opencv-contrib-python>=4.12.0.88", "opencv-python>=4.12.0.88", "reportlab>=4.4.4"]
 requires-python = ">=3.13"
 readme = "README.md"
 license = {text = "GNU GPLv3"}
