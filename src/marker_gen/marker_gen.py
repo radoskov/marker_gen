@@ -111,7 +111,7 @@ class PaperSize:
     def from_name(name: str, landscape: bool = False) -> 'PaperSize':
         name = name.upper()
         # ISO 216 sizes
-        sizes = {"A2": (420.0, 594.0), "A3": (297.0, 420.0), "A4": (210.0, 297.0), "A5": (148.0, 210.0)}
+        sizes = {"A3": (297.0, 420.0), "A4": (210.0, 297.0), "A5": (148.0, 210.0)}
         if name not in sizes:
             raise ValueError(f"Unsupported paper '{name}'. Use A3/A4/A5 or 'custom'.")
         w, h = sizes[name]
@@ -697,7 +697,7 @@ class CharucoBoardGenerator:
 
     def draw(self, squares_x: int, squares_y: int,
              square_mm: float, marker_mm: float,
-             border_bits: int = 1,
+             margin_mm: float = 6.0, border_bits: int = 1,
              legend_lines: Optional[List[str]] = None) -> np.ndarray:
         """
         Create a ChArUco board image (BGR). The board image area (without page margins)
@@ -706,6 +706,7 @@ class CharucoBoardGenerator:
         # Convert to pixel units for the rendered board image
         square_px = max(20, UnitHelper.mm_to_px(square_mm, self.dpi))
         marker_px = max(10, UnitHelper.mm_to_px(marker_mm, self.dpi))
+        margin_px = max(0, UnitHelper.mm_to_px(margin_mm, self.dpi))
 
         board = ArucoGen.make_charuco_board(
             squares_x, squares_y,
@@ -715,8 +716,8 @@ class CharucoBoardGenerator:
         )
 
         # OpenCV's draw uses 'outSize' and 'marginSize'. We'll build a board area and draw into it.
-        out_w = squares_x * square_px  # + 2 * margin_px
-        out_h = squares_y * square_px  # + 2 * margin_px
+        out_w = squares_x * square_px
+        out_h = squares_y * square_px
         img = ArucoGen.board_to_image(board, out_w, out_h, border_bits)
         img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
@@ -727,7 +728,7 @@ class CharucoBoardGenerator:
             legend_lines = [
                 f"{squares_x}x{squares_y} squares | dict={self.dict_name}",
                 f"square={square_mm:.2f}mm | marker={marker_mm:.2f}mm",
-                f"board={w_mm:.1f}x{h_mm:.1f} mm"
+                f"board={w_mm:.1f} x {h_mm:.1f} mm"
             ]
 
         font = cv2.FONT_HERSHEY_SIMPLEX
@@ -744,8 +745,8 @@ class CharucoBoardGenerator:
             if (sx + sy) % 2 == 0:
                 sx = (sx + 1) % squares_x
             # Square rectangle in pixels
-            x0 = sx * cell
-            y0 = sy * cell
+            x0 = margin_px + sx * cell
+            y0 = margin_px + sy * cell
 
             # Fit text inside padding box
             pad = max(2, cell // 10)
@@ -783,7 +784,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Common paper/output args
     def add_paper_args(sp):
         sp.add_argument("output", help="Output file path. Specifying extension overrides --format.")
-        sp.add_argument("--paper", choices=["A5", "A4", "A3", "A2", "custom"], default="A4", help="Paper size.")
+        sp.add_argument("--paper", choices=["A5", "A4", "A3", "custom"], default="A4", help="Paper size.")
         sp.add_argument("--landscape", action="store_true", help="Use landscape orientation (portrait by default).")
         sp.add_argument("--paper-mm", nargs=2, type=float, metavar=("WIDTH_MM", "HEIGHT_MM"), help="Custom paper size in mm (requires --paper custom).")
         sp.add_argument("--format", choices=["png", "pdf"], default="pdf", help="Output format.")
@@ -798,6 +799,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     sp_marker.add_argument("--dictionary", type=str, required=True,
                            help="Dictionary name (e.g. DICT_6X6_250, 5X5_100, ARUCO_ORIGINAL).")
     sp_marker.add_argument("--marker-size-mm", type=float, required=True, help="Marker side length in mm.")
+    sp_marker.add_argument("--margin-mm", type=float, default=10.0, help="Margin from page edges.")
 
     # --- sheet ---
     sp_sheet = sub.add_parser("sheet", help="Grid of multiple markers.")
@@ -808,6 +810,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     sp_sheet.add_argument("--rows", type=int, required=True)
     sp_sheet.add_argument("--cols", type=int, required=True)
     sp_sheet.add_argument("--spacing-mm", type=float, default=6.0, help="Spacing between markers.")
+    sp_sheet.add_argument("--margin-mm", type=float, default=10.0)
 
     # --- diamond ---
     sp_diamond = sub.add_parser("diamond", help="ChArUco diamond.")
@@ -820,6 +823,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                             help="Square size (diamond base square) in mm.")
     sp_diamond.add_argument("--marker-mm", type=float, required=True,
                             help="Marker size inside the square in mm.")
+    sp_diamond.add_argument("--margin-mm", type=float, default=10.0)
 
     # --- charuco ---
     sp_charuco = sub.add_parser("charuco", help="ChArUco (ArUco chessboard) board.")
@@ -829,6 +833,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     sp_charuco.add_argument("--square-mm", type=float, required=True, help="Square size in mm.")
     sp_charuco.add_argument("--marker-mm", type=float, required=True, help="Marker size in mm.")
     sp_charuco.add_argument("--dictionary", type=str, required=True, help="Dictionary name.")
+    sp_charuco.add_argument("--margin-mm", type=float, default=6.0, help="Outer white margin in mm.")
 
     return p
 
@@ -910,8 +915,8 @@ def main():
                                border_bits=args.border_bits)
 
         # Center on page (with margin guard)
-        x_mm = (paper.width_mm - args.marker_size_mm) / 2.0
-        y_mm = (paper.height_mm - args.marker_size_mm) / 2.0
+        x_mm = max(args.margin_mm, (paper.width_mm - args.marker_size_mm) / 2.0)
+        y_mm = max(args.margin_mm, (paper.height_mm - args.marker_size_mm) / 2.0)
         page.place(tile, x_mm, y_mm, args.marker_size_mm)
         if args.draw_ruler:
             page.draw_mm_ruler()
@@ -923,8 +928,8 @@ def main():
         sheet = MultiMarkerSheet(gen, page)
 
         # Simple fit check
-        total_w = args.cols * args.marker_size_mm + (args.cols - 1) * args.spacing_mm
-        total_h = args.rows * args.marker_size_mm + (args.rows - 1) * args.spacing_mm
+        total_w = args.margin_mm * 2 + args.cols * args.marker_size_mm + (args.cols - 1) * args.spacing_mm
+        total_h = args.margin_mm * 2 + args.rows * args.marker_size_mm + (args.rows - 1) * args.spacing_mm
         if total_w > paper.width_mm + 1e-6 or total_h > paper.height_mm + 1e-6:
             raise ValueError(f"Grid does not fit: needs {total_w:.1f}x{total_h:.1f} mm, "
                              f"page is {paper.width_mm:.1f}x{paper.height_mm:.1f} mm.")
@@ -948,14 +953,15 @@ def main():
             # ids = [int(x) for x in args.ids.split(",")]
             ids = args.ids
 
-        tile = gen.draw(ids4=ids, square_mm=args.square_mm, marker_mm=args.marker_mm, border_bits=args.border_bits)
+        tile = gen.draw(ids4=ids, square_mm=args.square_mm, marker_mm=args.marker_mm,
+                        border_bits=args.border_bits)
 
         # Place centered, respecting margin
-        # width_mm = min(paper.width_mm, 3.0 * args.square_mm + 2 * args.margin_mm)
         width_mm = 3.0 * args.square_mm
-        if paper.width_mm < width_mm:
-            raise ValueError(f"Grid does not fit: needs {width_mm:.1f}x{width_mm:.1f} mm, "
-                             f"page is {paper.width_mm:.1f}x{paper.height_mm:.1f} mm.")
+        if (paper.width_mm - width_mm - 2 * args.margin_mm) < 0:
+            raise ValueError(f"Page too small for diamond: needs {width_mm:.1f} mm + 2x{args.margin_mm:.1f} mm (margin), "
+                             f"({width_mm + 2 * args.margin_mm:.1f} in total), "
+                             f"page is {paper.width_mm:.1f} mm.")
         x_mm = (paper.width_mm - width_mm) / 2.0
         # Height == width for 3x3
         page.place(tile, x_mm, (paper.height_mm - width_mm) / 2.0, width_mm)
