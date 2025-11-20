@@ -49,7 +49,10 @@ python marker_gen.py --explain-dicts
 """
 
 from dataclasses import dataclass
-from typing import List, Tuple, Optional, Dict
+from math import e
+import os
+import random
+from typing import Any, List, Tuple, Optional, Dict
 import sys
 import re
 import argparse
@@ -102,16 +105,17 @@ class PaperSize:
     """Physical paper size in millimeters."""
     width_mm: float
     height_mm: float
+    name: str = "custom"
 
     @staticmethod
     def from_name(name: str, landscape: bool = False) -> 'PaperSize':
         name = name.upper()
         # ISO 216 sizes
-        sizes = {"A3": (297.0, 420.0), "A4": (210.0, 297.0), "A5": (148.0, 210.0)}
+        sizes = {"A2": (420.0, 594.0), "A3": (297.0, 420.0), "A4": (210.0, 297.0), "A5": (148.0, 210.0)}
         if name not in sizes:
             raise ValueError(f"Unsupported paper '{name}'. Use A3/A4/A5 or 'custom'.")
         w, h = sizes[name]
-        return PaperSize((h, w)[landscape], (w, h)[landscape])
+        return PaperSize((w, h)[landscape], (h, w)[landscape], name)
 
 
 # ---------------------------
@@ -242,15 +246,14 @@ class ArucoGen:
             return board
 
     @staticmethod
-    def board_to_image(board, out_w_px: int, out_h_px: int,
-                       margin_px: int, border_bits: int) -> np.ndarray:
+    def board_to_image(board, out_w_px: int, out_h_px: int, border_bits: int) -> np.ndarray:
         """Render a Board/CharucoBoard to grayscale using available API."""
         try:
-            img = board.generateImage((out_w_px, out_h_px), margin_px, border_bits)
+            img = board.generateImage((out_w_px, out_h_px), 0, border_bits)
         except Exception:
             # Legacy API: draw(outSize=, marginSize=, borderBits=)
             img = board.draw(outSize=(out_w_px, out_h_px),
-                             marginSize=margin_px, borderBits=border_bits)
+                             marginSize=0, borderBits=border_bits)
         return img
 
 
@@ -258,46 +261,115 @@ class ArucoGen:
 # Page composition & export
 # ---------------------------
 
+# class PageCanvas:
+#     """A white page (BGR) in pixel space, sized from paper mm and DPI.
+#     A white page canvas in pixel space that represents the physical page.
+#     You can place content (numpy images) onto it by mm coordinates.
+#     """
+#     def __init__(self, paper: PaperSize, dpi: int):
+#         self.paper = paper
+#         self.dpi = dpi
+#         self.width_px = UnitHelper.mm_to_px(paper.width_mm, dpi)
+#         self.height_px = UnitHelper.mm_to_px(paper.height_mm, dpi)
+#         # BGR canvas for OpenCV drawing
+#         self.img = np.full((self.height_px, self.width_px, 3), 255, np.uint8)
+#
+#     def place(self, tile: np.ndarray, x_mm: float, y_mm: float, width_mm: float) -> None:
+#         """
+#         Paste 'tile' (H x W x 3 or H x W grayscale) onto the page so that its top-left corner
+#         is at (x_mm, y_mm). If width_mm is given, the tile is resized to that width preserving
+#         aspect ratio before being placed.
+#         """
+#         if tile.ndim == 2:
+#             tile = cv2.cvtColor(tile, cv2.COLOR_GRAY2BGR)
+#
+#         target_w_px = max(1, UnitHelper.mm_to_px(width_mm, self.dpi))
+#         aspect = tile.shape[0] / tile.shape[1]
+#         target_h_px = max(1, int(round(target_w_px * aspect)))
+#         resized = cv2.resize(tile, (target_w_px, target_h_px), interpolation=cv2.INTER_NEAREST)
+#
+#         x_px = UnitHelper.mm_to_px(x_mm, self.dpi)
+#         y_px = UnitHelper.mm_to_px(y_mm, self.dpi)
+#
+#         # Clip to page if needed
+#         x1, y1 = max(0, x_px), max(0, y_px)
+#         x2, y2 = min(self.width_px, x_px + resized.shape[1]), min(self.height_px, y_px + resized.shape[0])
+#         if x2 > x1 and y2 > y1:
+#             self.img[y1:y2, x1:x2] = resized[(y1 - y_px):(y2 - y_px), (x1 - x_px):(x2 - x_px)]
+#
+#     def draw_mm_ruler(self, start_mm: float = 10.0, y_mm: float = None, length_mm: float = 100.0) -> None:
+#         """Draw a 100 mm test ruler for quick scale verification."""
+#         if y_mm is None:
+#             y_mm = self.paper.height_mm - 10.0
+#         x0 = UnitHelper.mm_to_px(start_mm, self.dpi)
+#         y = UnitHelper.mm_to_px(y_mm, self.dpi)
+#         L = UnitHelper.mm_to_px(length_mm, self.dpi)
+#         cv2.line(self.img, (x0, y), (x0 + L, y), (0, 0, 0), 1)
+#         for mm in range(0, int(length_mm) + 1):
+#             x = x0 + UnitHelper.mm_to_px(mm, self.dpi)
+#             tick = 10 if mm % 10 == 0 else (6 if mm % 5 == 0 else 3)
+#             cv2.line(self.img, (x, y - tick), (x, y + tick), (0, 0, 0), 1)
+#             if mm % 10 == 0:
+#                 cv2.putText(self.img, f"{mm} mm", (x + 2, y - 12),
+#                             cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 1, cv2.LINE_AA)
+
 class PageCanvas:
-    """A white page (BGR) in pixel space, sized from paper mm and DPI.
-    A white page canvas in pixel space that represents the physical page.
-    You can place content (numpy images) onto it by mm coordinates.
-    """
+    """A white page (BGR) raster for PNG AND a recorder of placements for PDF."""
     def __init__(self, paper: PaperSize, dpi: int):
         self.paper = paper
         self.dpi = dpi
         self.width_px = UnitHelper.mm_to_px(paper.width_mm, dpi)
         self.height_px = UnitHelper.mm_to_px(paper.height_mm, dpi)
-        # BGR canvas for OpenCV drawing
         self.img = np.full((self.height_px, self.width_px, 3), 255, np.uint8)
+
+        # For export (unified path): store dicts with original image and mm placement.
+        # Each item: {"img": BGR ndarray, "x_mm": float, "y_mm": float, "w_mm": float, "h_mm": float}
+        self._placements: List[Dict[str, Any]] = []
+        # Store ruler request so exporters can draw it as vector (PDF) or raster (PNG/JPG).
+        self._ruler = None  # (start_mm, y_mm, length_mm)
 
     def place(self, tile: np.ndarray, x_mm: float, y_mm: float, width_mm: float) -> None:
         """
-        Paste 'tile' (H x W x 3 or H x W grayscale) onto the page so that its top-left corner
-        is at (x_mm, y_mm). If width_mm is given, the tile is resized to that width preserving
-        aspect ratio before being placed.
+        Record a placement (and keep a quick raster preview on self.img for visual debug).
         """
         if tile.ndim == 2:
             tile = cv2.cvtColor(tile, cv2.COLOR_GRAY2BGR)
 
+        # Record the canonical placement (dictionary-based)
+        aspect = tile.shape[0] / tile.shape[1]  # h/w
+        height_mm = width_mm * aspect
+        self._placements.append({
+            "img": tile.copy(),
+            "x_mm": float(x_mm),
+            "y_mm": float(y_mm),
+            "w_mm": float(width_mm),
+            "h_mm": float(height_mm),
+        })
+
+        # Optional raster preview (not used by exporters; kept for debugging)
         target_w_px = max(1, UnitHelper.mm_to_px(width_mm, self.dpi))
-        aspect = tile.shape[0] / tile.shape[1]
         target_h_px = max(1, int(round(target_w_px * aspect)))
         resized = cv2.resize(tile, (target_w_px, target_h_px), interpolation=cv2.INTER_NEAREST)
 
         x_px = UnitHelper.mm_to_px(x_mm, self.dpi)
         y_px = UnitHelper.mm_to_px(y_mm, self.dpi)
 
-        # Clip to page if needed
         x1, y1 = max(0, x_px), max(0, y_px)
         x2, y2 = min(self.width_px, x_px + resized.shape[1]), min(self.height_px, y_px + resized.shape[0])
         if x2 > x1 and y2 > y1:
             self.img[y1:y2, x1:x2] = resized[(y1 - y_px):(y2 - y_px), (x1 - x_px):(x2 - x_px)]
 
-    def draw_mm_ruler(self, start_mm: float = 10.0, y_mm: Optional[float] = None, length_mm: float = 100.0) -> None:
-        """Draw a 100 mm test ruler for quick scale verification."""
+    def draw_mm_ruler(self, start_mm: float = 10.0, y_mm: float = None, length_mm: float = 100.0) -> None:
+        """
+        Draw a 100 mm test ruler AND remember it so exporters can render it consistently.
+        Ticks are one-sided to reduce visual clutter (drawn above the baseline in raster space).
+        """
         if y_mm is None:
             y_mm = self.paper.height_mm - 10.0
+        # Record for exporters
+        self._ruler = (start_mm, y_mm, length_mm)
+
+        # Raster preview (OpenCV uses top-left origin; y grows downward).
         x0 = UnitHelper.mm_to_px(start_mm, self.dpi)
         y = UnitHelper.mm_to_px(y_mm, self.dpi)
         L = UnitHelper.mm_to_px(length_mm, self.dpi)
@@ -305,30 +377,84 @@ class PageCanvas:
         for mm in range(0, int(length_mm) + 1):
             x = x0 + UnitHelper.mm_to_px(mm, self.dpi)
             tick = 10 if mm % 10 == 0 else (6 if mm % 5 == 0 else 3)
-            cv2.line(self.img, (x, y - tick), (x, y + tick), (0, 0, 0), 1)
+            # one-sided: upward from the baseline
+            cv2.line(self.img, (x, y), (x, y - tick), (0, 0, 0), 1)
             if mm % 10 == 0:
-                cv2.putText(self.img, f"{mm} mm", (x + 2, y - 12),
+                cv2.putText(self.img, f"{mm} mm", (x + 2, y - tick - 6),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 1, cv2.LINE_AA)
+
+    @property
+    def ruler(self):
+        return self._ruler
+
+    @property
+    def placements(self):
+        return self._placements
 
 
 class Exporter:
-    """Saves a PageCanvas as PNG (with DPI) or PDF (exact page size)."""
+    """Saves a PageCanvas as PNG (with DPI) or PDF (exact page size), rendering from placements."""
     def __init__(self, dpi: int = 300):
         self.dpi = dpi
+
+    def _render_raster_from_placements(self, page: PageCanvas) -> np.ndarray:
+        """Build a fresh white raster from placements (ignores the preview buffer)."""
+        canvas = np.full((page.height_px, page.width_px, 3), 255, np.uint8)
+
+        # Draw each placement
+        for pl in getattr(page, "_placements", []):
+            tile_bgr = pl["img"]
+            x_mm = pl["x_mm"]; y_mm = pl["y_mm"]; w_mm = pl["w_mm"]; h_mm = pl["h_mm"]
+            w_px = max(1, UnitHelper.mm_to_px(w_mm, page.dpi))
+            h_px = max(1, UnitHelper.mm_to_px(h_mm, page.dpi))
+            resized = cv2.resize(tile_bgr, (w_px, h_px), interpolation=cv2.INTER_NEAREST)
+
+            x_px = UnitHelper.mm_to_px(x_mm, page.dpi)
+            y_px = UnitHelper.mm_to_px(y_mm, page.dpi)
+            x1, y1 = max(0, x_px), max(0, y_px)
+            x2, y2 = min(page.width_px, x_px + resized.shape[1]), min(page.height_px, y_px + resized.shape[0])
+            if x2 > x1 and y2 > y1:
+                canvas[y1:y2, x1:x2] = resized[(y1 - y_px):(y2 - y_px), (x1 - x_px):(x2 - x_px)]
+
+        # Draw one-sided horizontal ruler if requested (upward ticks in raster space)
+        if page.ruler is not None:
+            start_mm, y_mm, length_mm = page.ruler
+            x0 = UnitHelper.mm_to_px(start_mm, page.dpi)
+            y = UnitHelper.mm_to_px(y_mm, page.dpi)
+            L = UnitHelper.mm_to_px(length_mm, page.dpi)
+            cv2.line(canvas, (x0, y), (x0 + L, y), (0, 0, 0), 1)
+            for mm in range(0, int(length_mm) + 1):
+                x = x0 + UnitHelper.mm_to_px(mm, page.dpi)
+                tick = 10 if mm % 10 == 0 else (6 if mm % 5 == 0 else 3)
+                cv2.line(canvas, (x, y), (x, y - tick), (0, 0, 0), 1)
+                if mm % 10 == 0:
+                    cv2.putText(canvas, f"{mm} mm", (x + 2, y - tick - 6),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 1, cv2.LINE_AA)
+
+        return canvas
 
     def save_png(self, page: PageCanvas, path: str) -> None:
         """
         Save the page canvas to a PNG with DPI metadata. This helps print software
         respect physical size (still choose 'Actual size' in the print dialog).
         """
-
-        rgb = cv2.cvtColor(page.img, cv2.COLOR_BGR2RGB)
+        raster = self._render_raster_from_placements(page)
+        rgb = cv2.cvtColor(raster, cv2.COLOR_BGR2RGB)
         Image.fromarray(rgb).save(path, format="PNG", dpi=(self.dpi, self.dpi))
+
+    def save_jpg(self, page: PageCanvas, path: str) -> None:
+        """
+        Save the page canvas to a JPEG with DPI metadata. This helps print software
+        respect physical size (still choose 'Actual size' in the print dialog).
+        """
+        raster = self._render_raster_from_placements(page)
+        rgb = cv2.cvtColor(raster, cv2.COLOR_BGR2RGB)
+        Image.fromarray(rgb).save(path, format="JPEG", dpi=(self.dpi, self.dpi), quality=100)
 
     def save_pdf(self, page: PageCanvas, path: str, paper: PaperSize) -> None:
         """
-        Save a PDF page with exact physical dimensions. The whole composed page image is
-        placed at 1:1 on a PDF page sized in mm.
+        Save a PDF page with exact physical dimensions. Items are placed individually
+        at their mm rectangles, so nothing touches page edges unless you ask it to.
         """
         if pdfcanvas is None:
             raise RuntimeError("reportlab is required for PDF export. Install: pip install reportlab")
@@ -337,11 +463,49 @@ class Exporter:
 
         w_pt = UnitHelper.mm_to_pdf_points(paper.width_mm)
         h_pt = UnitHelper.mm_to_pdf_points(paper.height_mm)
-        pil = Image.fromarray(cv2.cvtColor(page.img, cv2.COLOR_BGR2RGB))
         c = pdfcanvas.Canvas(path, pagesize=(w_pt, h_pt))
-        # Place image to fill the page exactly
-        c.drawImage(ImageReader(pil), 0, 0, width=w_pt, height=h_pt,
-                    preserveAspectRatio=False, mask='auto')
+        # Hint (some firmware ignore this, but harmless)
+        try:
+            c.setViewerPreference("PrintScaling", "None")
+        except Exception:
+            pass
+
+        # Draw recorded tiles one by one at their millimeter positions (unified path)
+        for pl in page.placements:
+            tile_bgr = pl["img"]
+            x_mm = pl["x_mm"]; y_mm = pl["y_mm"]; w_mm = pl["w_mm"]; h_mm = pl["h_mm"]
+            x_pt = UnitHelper.mm_to_pdf_points(x_mm)
+            y_pt = UnitHelper.mm_to_pdf_points(y_mm)
+            w_pt_i = UnitHelper.mm_to_pdf_points(w_mm)
+            h_pt_i = UnitHelper.mm_to_pdf_points(h_mm)
+
+            pil = Image.fromarray(cv2.cvtColor(tile_bgr, cv2.COLOR_BGR2RGB))
+            c.drawImage(ImageReader(pil), x_pt, y_pt,
+                        width=w_pt_i, height=h_pt_i,
+                        preserveAspectRatio=False, mask='auto')
+
+        # Optional: one-sided vector ruler (draw ticks above baseline; PDF y grows upward)
+        if page.ruler is not None:
+            start_mm, y_mm, length_mm = page.ruler
+            x0 = UnitHelper.mm_to_pdf_points(start_mm)
+            y = UnitHelper.mm_to_pdf_points(y_mm)
+            L = UnitHelper.mm_to_pdf_points(length_mm)
+            tick_short = UnitHelper.mm_to_pdf_points(1.5)
+            tick_mid = UnitHelper.mm_to_pdf_points(2.5)
+            tick_long = UnitHelper.mm_to_pdf_points(4.0)
+            c.setLineWidth(0.5)
+            c.line(x0, y, x0 + L, y)
+            for mm in range(0, int(length_mm) + 1):
+                x = x0 + UnitHelper.mm_to_pdf_points(mm)
+                tick = tick_long if mm % 10 == 0 else (tick_mid if mm % 5 == 0 else tick_short)
+                # one-sided: upward from the baseline
+                c.line(x, y, x, y + tick)
+                if mm % 10 == 0:
+                    c.setFont("Helvetica", 6)
+                    c.drawString(x + UnitHelper.mm_to_pdf_points(1.0),
+                                 y + tick + UnitHelper.mm_to_pdf_points(0.8),
+                                 f"{mm} mm")
+
         c.showPage()
         c.save()
 
@@ -468,7 +632,6 @@ class DiamondGenerator:
         self.dpi = dpi
 
     def draw(self, ids4: List[int], square_mm: float, marker_mm: float,
-             margin_mm: float = 10.0,
              border_bits: int = 1,
              legend_lines: Optional[List[str]] = None) -> np.ndarray:
         """
@@ -480,7 +643,6 @@ class DiamondGenerator:
 
         square_px = max(20, UnitHelper.mm_to_px(square_mm, self.dpi))
         marker_px = max(10, UnitHelper.mm_to_px(marker_mm, self.dpi))
-        margin_px = max(0, UnitHelper.mm_to_px(margin_mm, self.dpi))
 
         # Board uses relative sizes; we pass 1.0 and the ratio.
         board = ArucoGen.make_charuco_board(3, 3,
@@ -489,8 +651,8 @@ class DiamondGenerator:
                                             dictionary=self.dictionary,
                                             ids=ids4)
 
-        out_side = 3 * square_px + 2 * margin_px
-        img = ArucoGen.board_to_image(board, out_side, out_side, margin_px, border_bits)
+        out_side = 3 * square_px
+        img = ArucoGen.board_to_image(board, out_side, out_side, border_bits)
         img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
         # Legend defaults
@@ -498,19 +660,18 @@ class DiamondGenerator:
             legend_lines = [
                 f"diamond ids={ids4}",
                 f"dict={self.dict_name}",
-                f"square={square_mm:.2f}mm | marker={marker_mm:.2f}mm"
+                f"square={square_mm:.2f}mm | marker={marker_mm:.2f}mm",
+                f"marker border={border_bits}"
             ]
 
         # Write small white text into black squares (3x3). Black squares: (x+y)%2==1 with TL white.
         H, W = img.shape[:2]
         cell = square_px
         font = cv2.FONT_HERSHEY_SIMPLEX
-        targets = [(1, 0), (0, 1), (2, 1), (1, 2)]  # four distinct black squares
+        targets = [(0, 0), (0, 2), (1, 1), (2, 0), (2, 2)]  # black squares
         for (sx, sy), text in zip(targets, legend_lines):
-            if (sx + sy) % 2 == 0:
-                sx = (sx + 1) % 3
-            x0 = margin_px + sx * cell
-            y0 = margin_px + sy * cell
+            x0 = sx * cell
+            y0 = sy * cell
             pad = max(2, cell // 10)
             avail_w = cell - 2 * pad
             avail_h = cell - 2 * pad
@@ -536,7 +697,7 @@ class CharucoBoardGenerator:
 
     def draw(self, squares_x: int, squares_y: int,
              square_mm: float, marker_mm: float,
-             margin_mm: float = 6.0, border_bits: int = 1,
+             border_bits: int = 1,
              legend_lines: Optional[List[str]] = None) -> np.ndarray:
         """
         Create a ChArUco board image (BGR). The board image area (without page margins)
@@ -545,7 +706,6 @@ class CharucoBoardGenerator:
         # Convert to pixel units for the rendered board image
         square_px = max(20, UnitHelper.mm_to_px(square_mm, self.dpi))
         marker_px = max(10, UnitHelper.mm_to_px(marker_mm, self.dpi))
-        margin_px = max(0, UnitHelper.mm_to_px(margin_mm, self.dpi))
 
         board = ArucoGen.make_charuco_board(
             squares_x, squares_y,
@@ -555,9 +715,9 @@ class CharucoBoardGenerator:
         )
 
         # OpenCV's draw uses 'outSize' and 'marginSize'. We'll build a board area and draw into it.
-        out_w = squares_x * square_px + 2 * margin_px
-        out_h = squares_y * square_px + 2 * margin_px
-        img = ArucoGen.board_to_image(board, out_w, out_h, margin_px, border_bits)
+        out_w = squares_x * square_px  # + 2 * margin_px
+        out_h = squares_y * square_px  # + 2 * margin_px
+        img = ArucoGen.board_to_image(board, out_w, out_h, border_bits)
         img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
         # Default legend
@@ -567,7 +727,7 @@ class CharucoBoardGenerator:
             legend_lines = [
                 f"{squares_x}x{squares_y} squares | dict={self.dict_name}",
                 f"square={square_mm:.2f}mm | marker={marker_mm:.2f}mm",
-                f"board={w_mm:.1f}×{h_mm:.1f} mm"
+                f"board={w_mm:.1f}x{h_mm:.1f} mm"
             ]
 
         font = cv2.FONT_HERSHEY_SIMPLEX
@@ -584,8 +744,8 @@ class CharucoBoardGenerator:
             if (sx + sy) % 2 == 0:
                 sx = (sx + 1) % squares_x
             # Square rectangle in pixels
-            x0 = margin_px + sx * cell
-            y0 = margin_px + sy * cell
+            x0 = sx * cell
+            y0 = sy * cell
 
             # Fit text inside padding box
             pad = max(2, cell // 10)
@@ -622,23 +782,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # Common paper/output args
     def add_paper_args(sp):
-        sp.add_argument("--paper", choices=["A5", "A4", "A3", "custom"], default="A4", help="Paper size.")
-        sp.add_argument("--landscape", action="store_true", help="Use landscape orientation.")
+        sp.add_argument("output", help="Output file path. Specifying extension overrides --format.")
+        sp.add_argument("--paper", choices=["A5", "A4", "A3", "A2", "custom"], default="A4", help="Paper size.")
+        sp.add_argument("--landscape", action="store_true", help="Use landscape orientation (portrait by default).")
         sp.add_argument("--paper-mm", nargs=2, type=float, metavar=("WIDTH_MM", "HEIGHT_MM"), help="Custom paper size in mm (requires --paper custom).")
         sp.add_argument("--format", choices=["png", "pdf"], default="pdf", help="Output format.")
         sp.add_argument("--dpi", type=int, default=300, help="Raster DPI (affects PNG pixel size and internal raster for PDF).")
-        sp.add_argument("--output", "-o", required=True, help="Output file path.")
         sp.add_argument("--draw-ruler", "--ruler", action="store_true", help="Draw a 100 mm ruler at bottom to verify scale.")
+        sp.add_argument("--border-bits", type=int, default=1, help="Black border thickness (in modules).")
 
     # --- marker ---
     sp_marker = sub.add_parser("marker", help="Single ArUco marker.")
     add_paper_args(sp_marker)
-    sp_marker.add_argument("--id", type=int, required=True, help="Marker ID.")
+    sp_marker.add_argument("--id", type=int, help="Marker ID. Will use random if not specified.")
     sp_marker.add_argument("--dictionary", type=str, required=True,
                            help="Dictionary name (e.g. DICT_6X6_250, 5X5_100, ARUCO_ORIGINAL).")
     sp_marker.add_argument("--marker-size-mm", type=float, required=True, help="Marker side length in mm.")
-    sp_marker.add_argument("--border-bits", type=int, default=2, help="Black border thickness (in modules).")
-    sp_marker.add_argument("--margin-mm", type=float, default=10.0, help="Margin from page edges.")
 
     # --- sheet ---
     sp_sheet = sub.add_parser("sheet", help="Grid of multiple markers.")
@@ -649,13 +808,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     sp_sheet.add_argument("--rows", type=int, required=True)
     sp_sheet.add_argument("--cols", type=int, required=True)
     sp_sheet.add_argument("--spacing-mm", type=float, default=6.0, help="Spacing between markers.")
-    sp_sheet.add_argument("--border-bits", type=int, default=2)
-    sp_sheet.add_argument("--margin-mm", type=float, default=10.0)
 
     # --- diamond ---
     sp_diamond = sub.add_parser("diamond", help="ChArUco diamond.")
     add_paper_args(sp_diamond)
-    sp_diamond.add_argument("--ids", type=int, nargs=4, required=True,
+    sp_diamond.add_argument("--ids", type=int, nargs=4,
                             help="Four marker IDs for the diamond.")
     sp_diamond.add_argument("--dictionary", type=str, default="DICT_4X4_50",
                             help="Dictionary name.")
@@ -663,7 +820,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
                             help="Square size (diamond base square) in mm.")
     sp_diamond.add_argument("--marker-mm", type=float, required=True,
                             help="Marker size inside the square in mm.")
-    sp_diamond.add_argument("--margin-mm", type=float, default=10.0)
 
     # --- charuco ---
     sp_charuco = sub.add_parser("charuco", help="ChArUco (ArUco chessboard) board.")
@@ -673,8 +829,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     sp_charuco.add_argument("--square-mm", type=float, required=True, help="Square size in mm.")
     sp_charuco.add_argument("--marker-mm", type=float, required=True, help="Marker size in mm.")
     sp_charuco.add_argument("--dictionary", type=str, required=True, help="Dictionary name.")
-    sp_charuco.add_argument("--margin-mm", type=float, default=6.0, help="Outer white margin in mm.")
-    sp_charuco.add_argument("--border-bits", type=int, default=1, help="Marker border bits.")
 
     return p
 
@@ -711,37 +865,69 @@ def main():
     page = PageCanvas(paper, dpi=args.dpi)
     exporter = Exporter(dpi=args.dpi)
 
+    # resolve file name from format
+    fname, ext = os.path.splitext(args.output)
+    if not ext:
+        if args.format == "png":
+            args.output = f"{fname}.png"
+        elif args.format == "jpg":
+            args.output = f"{fname}.jpg"
+        elif args.format == "pdf":
+            args.output = f"{fname}.pdf"
+        else:
+            raise ValueError(f"Unknown format: {args.format}")
+    else:
+        if ext not in (".png", ".jpg", ".pdf"):
+            raise ValueError(f"Unknown extension: {ext}")
+        if ext == ".png":
+            args.format = "png"
+        elif ext == ".jpg":
+            args.format = "jpg"
+        elif ext == ".pdf":
+            args.format = "pdf"
+
+    def export(page: PageCanvas):
+        if args.format == "png":
+            exporter.save_png(page, args.output)
+        elif args.format == "jpg":
+            exporter.save_jpg(page, args.output)
+        elif args.format == "pdf":
+            exporter.save_pdf(page, args.output, paper)
+
     # Mode-specific generation
     if args.mode == "marker":
         dictionary, dict_name = DictionaryInfo.resolve(args.dictionary)
         gen = MarkerGenerator(dictionary, dict_name, dpi=args.dpi)
 
         # Create the marker tile (annotated)
-        tile = gen.draw_single(marker_id=args.id,
+        if args.id is None:
+            # random marker ID
+            marker_id = random.randint(0, dictionary.bytesList.shape[0] - 1)
+        else:
+            marker_id = args.id
+        tile = gen.draw_single(marker_id=marker_id,
                                size_mm=args.marker_size_mm,
                                border_bits=args.border_bits)
 
         # Center on page (with margin guard)
-        x_mm = max(args.margin_mm, (paper.width_mm - args.marker_size_mm) / 2.0)
-        y_mm = max(args.margin_mm, (paper.height_mm - args.marker_size_mm) / 2.0)
+        x_mm = (paper.width_mm - args.marker_size_mm) / 2.0
+        y_mm = (paper.height_mm - args.marker_size_mm) / 2.0
         page.place(tile, x_mm, y_mm, args.marker_size_mm)
         if args.draw_ruler:
             page.draw_mm_ruler()
 
-        # Export
-        (exporter.save_png if args.format == "png" else exporter.save_pdf)(page, args.output, paper)
-
+        export(page)
     elif args.mode == "sheet":
         dictionary, dict_name = DictionaryInfo.resolve(args.dictionary)
         gen = MarkerGenerator(dictionary, dict_name, dpi=args.dpi)
         sheet = MultiMarkerSheet(gen, page)
 
         # Simple fit check
-        total_w = args.margin_mm * 2 + args.cols * args.marker_size_mm + (args.cols - 1) * args.spacing_mm
-        total_h = args.margin_mm * 2 + args.rows * args.marker_size_mm + (args.rows - 1) * args.spacing_mm
+        total_w = args.cols * args.marker_size_mm + (args.cols - 1) * args.spacing_mm
+        total_h = args.rows * args.marker_size_mm + (args.rows - 1) * args.spacing_mm
         if total_w > paper.width_mm + 1e-6 or total_h > paper.height_mm + 1e-6:
-            raise ValueError(f"Grid does not fit: needs {total_w:.1f}×{total_h:.1f} mm, "
-                             f"page is {paper.width_mm:.1f}×{paper.height_mm:.1f} mm.")
+            raise ValueError(f"Grid does not fit: needs {total_w:.1f}x{total_h:.1f} mm, "
+                             f"page is {paper.width_mm:.1f}x{paper.height_mm:.1f} mm.")
 
         sheet.render(ids=args.ids, dictionary_name=dict_name,
                      marker_size_mm=args.marker_size_mm,
@@ -750,23 +936,33 @@ def main():
                      border_bits=args.border_bits)
         if args.draw_ruler:
             page.draw_mm_ruler()
-        (exporter.save_png if args.format == "png" else exporter.save_pdf)(page, args.output, paper)
 
+        export(page)
     elif args.mode == "diamond":
         dictionary, dict_name = DictionaryInfo.resolve(args.dictionary)
         gen = DiamondGenerator(dictionary, dict_name, dpi=args.dpi)
-        tile = gen.draw(ids4=args.ids, square_mm=args.square_mm, marker_mm=args.marker_mm,
-                        margin_mm=args.margin_mm, border_bits=args.border_bits)
+        if args.ids is None:
+            # random IDs
+            ids = [random.randint(0, dictionary.bytesList.shape[0] - 1) for _ in range(4)]
+        else:
+            # ids = [int(x) for x in args.ids.split(",")]
+            ids = args.ids
+
+        tile = gen.draw(ids4=ids, square_mm=args.square_mm, marker_mm=args.marker_mm, border_bits=args.border_bits)
 
         # Place centered, respecting margin
-        width_mm = min(paper.width_mm - 2 * args.margin_mm, 3.0 * args.square_mm + 2 * args.margin_mm)
+        # width_mm = min(paper.width_mm, 3.0 * args.square_mm + 2 * args.margin_mm)
+        width_mm = 3.0 * args.square_mm
+        if paper.width_mm < width_mm:
+            raise ValueError(f"Grid does not fit: needs {width_mm:.1f}x{width_mm:.1f} mm, "
+                             f"page is {paper.width_mm:.1f}x{paper.height_mm:.1f} mm.")
         x_mm = (paper.width_mm - width_mm) / 2.0
         # Height == width for 3x3
         page.place(tile, x_mm, (paper.height_mm - width_mm) / 2.0, width_mm)
         if args.draw_ruler:
             page.draw_mm_ruler()
-        (exporter.save_png if args.format == "png" else exporter.save_pdf)(page, args.output, paper)
 
+        export(page)
     elif args.mode == "charuco":
         dictionary, dict_name = DictionaryInfo.resolve(args.dictionary)
         gen = CharucoBoardGenerator(dictionary, dict_name, dpi=args.dpi)
@@ -777,15 +973,15 @@ def main():
         board_w_mm = args.squares_x * args.square_mm + 2 * args.margin_mm
         board_h_mm = args.squares_y * args.square_mm + 2 * args.margin_mm
         if board_w_mm > paper.width_mm + 1e-6 or board_h_mm > paper.height_mm + 1e-6:
-            raise ValueError(f"Board ({board_w_mm:.1f}×{board_h_mm:.1f} mm) exceeds page "
-                             f"({paper.width_mm:.1f}×{paper.height_mm:.1f} mm).")
+            raise ValueError(f"Board ({board_w_mm:.1f}x{board_h_mm:.1f} mm) exceeds page "
+                             f"({paper.width_mm:.1f}x{paper.height_mm:.1f} mm).")
         x_mm = (paper.width_mm - board_w_mm) / 2.0
         y_mm = (paper.height_mm - board_h_mm) / 2.0
         page.place(tile, x_mm, y_mm, board_w_mm)
         if args.draw_ruler:
             page.draw_mm_ruler()
-        (exporter.save_png if args.format == "png" else exporter.save_pdf)(page, args.output, paper)
 
+        export(page)
     else:
         parser.error(f"Unknown mode {args.mode!r}")
 
