@@ -1,0 +1,45 @@
+camera:
+  source: realsense         # realsense | ros
+  warmup_frames: 15
+  serial: null              # choose specific device or leave null
+  rgb_width: 1280
+  rgb_height: 720
+  rgb_fps: 30
+  # Optional intrinsics fallback (used if RealSense/ROS CameraInfo not available)
+  fx: null
+  fy: null
+  cx: null
+  cy: null
+  dist: null                # [k1,k2,p1,p2,k3,(k4,k5,k6)]
+
+aruco:
+  dictionary: DICT_4X4_100
+  # detect_mode: marker       # marker | diamond
+  detect_mode: diamond       # marker | diamond
+  marker_id: 5              # if you want a specific ID; otherwise first detected is used
+  marker_size_mm: 50.0
+  diamond_square_mm: 60.0
+  border_bits: 1
+  corner_refine: true
+
+runtime:
+  mode: continuous          # single | continuous
+  throttle_sec: 0.10
+  filter_enable: true
+  filter_strength: 0.8      # 0=no smoothing, 1=heavy smoothing
+  stale_tf_sec: 2.0
+  warn_every_sec: 1.0
+
+output:
+  show_window: true
+  window_name: "Aruco Pose"
+  draw_axes_length_m: 0.05
+  ros_enable: false         # true to enable ROS mode
+  ros_version: auto         # auto | ros2 | ros1
+  ros_in_image_topic: "/camera/color/image_raw"
+  ros_in_camera_info: "/camera/color/camera_info"
+  ros_out_image_topic: "/aruco/annotated"
+  tf_enable: false
+  tf_parent: "camera"
+  tf_child: "marker"
+  tf_broadcast_hz: 20.0
